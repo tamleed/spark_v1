@@ -1,0 +1,14 @@
+[Unit]
+Description=JupyterLab (tailnet-only)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+User=ubuntu
+WorkingDirectory=/home/ubuntu/work
+ExecStart=/opt/jupyter-venv/bin/jupyter lab --ip=127.0.0.1 --port=8888 --no-browser --ServerApp.token=${JUPYTER_TOKEN}
+
+[Install]
+WantedBy=multi-user.target

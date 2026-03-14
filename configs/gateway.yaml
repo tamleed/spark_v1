@@ -1,0 +1,47 @@
+server:
+  host: 127.0.0.1
+  port: 8000
+
+redis:
+  url: redis://127.0.0.1:6379/0
+
+jobs:
+  default_queue: default
+  admin_queue: admin
+  result_ttl_sec: 86400
+
+policies:
+  default_async: true
+  allow_sync_when_idle_and_model_ready: true
+  max_tokens_upper_bound: 4096
+
+switching:
+  switch_timeout_sec: 1200
+  backend_ready_timeout_sec: 900
+  graceful_stop_timeout_sec: 30
+  wait_timeout_sec: 1200
+
+inference:
+  inference_timeout_sec: 3600
+
+locks:
+  file_lock_path: /var/lock/llm-switch.lock
+
+security:
+  require_api_key: true
+  public_health_without_key: true
+  cors_allow_origins: []
+
+network:
+  public_access_mode: tailscale_funnel
+  bind_localhost_only: true
+
+
+docker:
+  runtime: nvidia
+  network_mode: host
+  ipc_mode: host
+  shm_size: 16g
+  ulimits:
+    memlock: -1
+    stack: 67108864

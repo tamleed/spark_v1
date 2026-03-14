@@ -1,0 +1,14 @@
+[Unit]
+Description=LLM Switchboard Gateway
+After=network-online.target docker.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+EnvironmentFile=/etc/llm-gateway.env
+WorkingDirectory=/opt/llm-switchboard/gateway
+ExecStart=/opt/llm-switchboard/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+[Install]
+WantedBy=multi-user.target
