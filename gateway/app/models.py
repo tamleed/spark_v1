@@ -13,6 +13,7 @@ class JobStatus(str, Enum):
     succeeded = "succeeded"
     failed = "failed"
     cancelled = "cancelled"
+    not_completed = "not_completed"
 
 
 class ChatMessage(BaseModel):

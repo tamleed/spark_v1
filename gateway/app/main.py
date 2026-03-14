@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .auth import require_api_key
 from .config import load_config
 from .middleware import RequestContextMiddleware, SimpleRateLimitMiddleware
+from .model_registry import build_model_list
 from .routes_admin import router as admin_router
 from .routes_jobs import router as jobs_router
 from .routes_openai import router as openai_router
@@ -17,7 +18,7 @@ from .switcher import ModelSwitcher
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
-app = FastAPI(title="LLM Switchboard", version="0.1.0", dependencies=[Depends(require_api_key)])
+app = FastAPI(title="LLM Switchboard", version="0.2.0", dependencies=[Depends(require_api_key)])
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(SimpleRateLimitMiddleware, requests_per_minute=120)
 
@@ -35,6 +36,7 @@ if cors_origins:
 
 app.state.gateway_cfg = cfg.gateway
 app.state.models_cfg = cfg.models
+app.state.model_list = build_model_list(cfg.models, cfg.gateway)
 app.state.switcher = ModelSwitcher(cfg.gateway, cfg.models)
 app.state.started_at = time.time()
 app.state.current_job_id = None
@@ -47,4 +49,9 @@ app.include_router(admin_router)
 
 @app.get("/")
 def root(request: Request):
-    return {"service": "llm-switchboard", "request_id": getattr(request.state, "request_id", None)}
+    return {
+        "service": "llm-switchboard",
+        "request_id": getattr(request.state, "request_id", None),
+        "async_api": True,
+        "job_mode": "external async via /v1/chat/completions and /jobs",
+    }

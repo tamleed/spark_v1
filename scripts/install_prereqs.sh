@@ -6,7 +6,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 USER_NAME="${SUDO_USER:-$USER}"
 UBUNTU_CODENAME="$(. /etc/os-release && echo ${UBUNTU_CODENAME})"
 
-sudo mkdir -p "$ROOT_DIR" /var/lib/huggingface /mnt/models "/home/${USER_NAME}/work"
+sudo mkdir -p "$ROOT_DIR" /var/lib/huggingface /mnt/models "$ROOT_DIR/models" "$ROOT_DIR/model" "/home/${USER_NAME}/work"
 sudo chown -R "$USER_NAME":"$USER_NAME" "$ROOT_DIR" "/home/${USER_NAME}/work"
 
 sudo apt-get update

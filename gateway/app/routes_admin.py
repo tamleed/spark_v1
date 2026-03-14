@@ -4,6 +4,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 
+from .model_registry import build_model_list
 from .models import AdminSwitchRequest
 from .queue import enqueue_chat_job, get_queue, redis_conn
 
@@ -32,6 +33,7 @@ def status(request: Request):
         "backend_state": st.backend_state,
         "queue_length": q.count,
         "uptime": uptime,
+        "containers_split": True,
     }
 
 
@@ -51,29 +53,21 @@ def queue_status(request: Request):
 
 @router.post("/admin/switch")
 def manual_switch(body: AdminSwitchRequest, request: Request):
-    models = [m["name"] for m in request.app.state.models_cfg["models"]]
+    models = [m["name"] for m in build_model_list(request.app.state.models_cfg, request.app.state.gateway_cfg)]
     if body.model not in models:
         raise HTTPException(400, "unknown model")
 
-    q = get_queue(request.app.state.gateway_cfg)
-    st = request.app.state.switcher.state
-    if q.count == 0 and not st.switching:
-        job = enqueue_chat_job(request.app.state.gateway_cfg, {
+    job = enqueue_chat_job(
+        request.app.state.gateway_cfg,
+        {
             "model": body.model,
             "messages": [{"role": "user", "content": "ping"}],
             "temperature": 0,
             "max_tokens": 1,
             "stream": False,
-        }, admin=True)
-        return {"mode": "queued_admin_job", "job_id": job.id}
-
-    job = enqueue_chat_job(request.app.state.gateway_cfg, {
-        "model": body.model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "temperature": 0,
-        "max_tokens": 1,
-        "stream": False,
-    }, admin=True)
+        },
+        admin=True,
+    )
     return {"mode": "queued_admin_job", "job_id": job.id}
 
 

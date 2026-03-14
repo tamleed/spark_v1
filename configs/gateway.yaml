@@ -22,7 +22,15 @@ switching:
   wait_timeout_sec: 1200
 
 inference:
-  inference_timeout_sec: 3600
+  inference_timeout_sec: 240
+
+inference_backend:
+  default_port: 8001
+  default_vllm_args:
+    - --dtype
+    - bfloat16
+    - --max-model-len
+    - "8192"
 
 locks:
   file_lock_path: /var/lock/llm-switch.lock
@@ -35,7 +43,6 @@ security:
 network:
   public_access_mode: tailscale_funnel
   bind_localhost_only: true
-
 
 docker:
   runtime: nvidia

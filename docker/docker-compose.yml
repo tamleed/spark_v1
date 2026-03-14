@@ -5,10 +5,45 @@ services:
     image: redis:7-alpine
     container_name: llm-switch-redis
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "127.0.0.1:6379:6379"
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.app
+    container_name: llm-switch-gateway
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - /etc/llm-gateway.env
+    environment:
+      - REDIS_URL=redis://127.0.0.1:6379/0
+      - MODELS_YAML_PATH=/app/configs/models.yaml
+      - GATEWAY_YAML_PATH=/app/configs/gateway.yaml
+    command: ["uvicorn", "gateway.app.main:app", "--host", "127.0.0.1", "--port", "8000"]
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.app
+    container_name: llm-switch-worker
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - /etc/llm-gateway.env
+    environment:
+      - REDIS_URL=redis://127.0.0.1:6379/0
+      - MODELS_YAML_PATH=/app/configs/models.yaml
+      - GATEWAY_YAML_PATH=/app/configs/gateway.yaml
+    command: ["python", "/app/worker/worker.py"]
+    depends_on:
+      - redis
 
   dgx-gpu-check:
     image: nvidia/cuda:12.4.1-base-ubuntu22.04

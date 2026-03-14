@@ -10,6 +10,10 @@ from typing import Any, Dict, Optional
 import httpx
 
 from .locks import combined_lock
+from .model_registry import find_model
+
+
+OOM_MARKERS = ["out of memory", "cuda out of memory", "cublas", "oom"]
 
 
 @dataclass
@@ -18,6 +22,7 @@ class BackendState:
     backend_state: str = "stopped"
     switching: bool = False
     container_name: Optional[str] = None
+    last_error: Optional[str] = None
 
 
 class ModelSwitcher:
@@ -31,8 +36,7 @@ class ModelSwitcher:
         return self.state.active_model
 
     def _container_name(self, model_name: str) -> str:
-        safe = model_name.replace("_", "-")
-        return f"{self._prefix}-{safe}"
+        return f"{self._prefix}-{model_name.replace('_', '-')}"
 
     def _run(self, cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, text=True, capture_output=True, check=check)
@@ -54,7 +58,7 @@ class ModelSwitcher:
         self.state.backend_state = "stopped"
 
     def start_model(self, model_name: str) -> None:
-        model = next((m for m in self.models_cfg["models"] if m["name"] == model_name), None)
+        model = find_model(self.models_cfg, self.cfg, model_name)
         if not model:
             raise ValueError(f"Unknown model: {model_name}")
 
@@ -66,23 +70,18 @@ class ModelSwitcher:
         vllm_args = backend.get("vllm_args", [])
 
         docker_cfg = self.cfg.get("docker", {})
-        docker_network_mode = os.getenv("DOCKER_NETWORK_MODE", docker_cfg.get("network_mode", "host"))
-        runtime = os.getenv("DOCKER_RUNTIME", docker_cfg.get("runtime", "nvidia"))
-        shm_size = os.getenv("DOCKER_SHM_SIZE", docker_cfg.get("shm_size", "16g"))
-        ipc_mode = os.getenv("DOCKER_IPC_MODE", docker_cfg.get("ipc_mode", "host"))
-        ulimit_memlock = str(docker_cfg.get("ulimits", {}).get("memlock", -1))
-        ulimit_stack = str(docker_cfg.get("ulimits", {}).get("stack", 67108864))
-
         cmd = [
             "docker", "run", "-d",
             "--name", container_name,
-            "--runtime", runtime,
+            "--runtime", os.getenv("DOCKER_RUNTIME", docker_cfg.get("runtime", "nvidia")),
             "--gpus", "all",
-            "--network", docker_network_mode,
-            "--ipc", ipc_mode,
-            "--shm-size", shm_size,
-            "--ulimit", f"memlock={ulimit_memlock}",
-            "--ulimit", f"stack={ulimit_stack}",
+            "--network", os.getenv("DOCKER_NETWORK_MODE", docker_cfg.get("network_mode", "host")),
+            "--ipc", os.getenv("DOCKER_IPC_MODE", docker_cfg.get("ipc_mode", "host")),
+            "--shm-size", os.getenv("DOCKER_SHM_SIZE", docker_cfg.get("shm_size", "16g")),
+            "--ulimit", f"memlock={docker_cfg.get('ulimits', {}).get('memlock', -1)}",
+            "--ulimit", f"stack={docker_cfg.get('ulimits', {}).get('stack', 67108864)}",
+            "-v", "/opt/llm-switchboard/models:/opt/llm-switchboard/models",
+            "-v", "/opt/llm-switchboard/model:/opt/llm-switchboard/model",
             "-v", "/mnt/models:/mnt/models",
             "-v", "/var/lib/huggingface:/var/lib/huggingface",
             "-e", "HF_HOME=/var/lib/huggingface",
@@ -96,35 +95,31 @@ class ModelSwitcher:
             cmd.extend(["-e", f"HF_TOKEN={hf_token}"])
 
         cmd.append(image)
-        cmd.extend(
-            [
-                "python",
-                "-m",
-                "vllm.entrypoints.openai.api_server",
-                "--host",
-                "0.0.0.0",
-                "--port",
-                port,
-                "--model",
-                source,
-            ]
-        )
+        cmd.extend(["python", "-m", "vllm.entrypoints.openai.api_server", "--host", "0.0.0.0", "--port", port, "--model", source])
         cmd.extend(vllm_args)
 
         proc = self._run(cmd, check=False)
         if proc.returncode != 0:
-            raise RuntimeError(f"Failed to start backend: {proc.stderr.strip()}")
+            msg = proc.stderr.strip() or proc.stdout.strip()
+            self.state.last_error = msg
+            if self._is_oom(msg):
+                self.stop_current_model()
+                raise RuntimeError("GPU OOM while starting backend; model stopped and system is ready for next jobs")
+            raise RuntimeError(f"Failed to start backend: {msg}")
 
         self.state.container_name = container_name
         self.state.active_model = model_name
         self.state.backend_state = "starting"
 
+    def _is_oom(self, text: str) -> bool:
+        t = (text or "").lower()
+        return any(marker in t for marker in OOM_MARKERS)
+
     async def wait_backend_ready(self, model_name: str) -> None:
-        model = next((m for m in self.models_cfg["models"] if m["name"] == model_name), None)
+        model = find_model(self.models_cfg, self.cfg, model_name)
         if not model:
             raise ValueError(f"Unknown model: {model_name}")
         port = int(model["backend"].get("port", 8001))
-
         timeout = int(self.cfg["switching"]["backend_ready_timeout_sec"])
         deadline = time.time() + timeout
         url = f"http://127.0.0.1:{port}/v1/models"
@@ -143,8 +138,12 @@ class ModelSwitcher:
         logs = ""
         if self.state.container_name:
             out = self._run(["docker", "logs", "--tail", "200", self.state.container_name], check=False)
-            logs = out.stdout + "\n" + out.stderr
+            logs = (out.stdout or "") + "\n" + (out.stderr or "")
         self.state.backend_state = "failed"
+        self.state.last_error = logs[:2000]
+        if self._is_oom(logs):
+            self.stop_current_model()
+            raise RuntimeError("GPU OOM while loading model; backend stopped and queue can continue")
         raise TimeoutError(f"Backend did not become ready in {timeout}s. Logs: {logs[:2000]}")
 
     async def ensure_model_active(self, model_name: str, file_lock_path: str) -> None:

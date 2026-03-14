@@ -6,6 +6,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request
 from rq.command import send_stop_job_command
 
+from .model_registry import find_model
 from .models import JobCreateRequest, JobResponse, JobStatus
 from .queue import enqueue_chat_job, fetch_job, queue_position, redis_conn
 
@@ -31,9 +32,8 @@ def _job_to_response(cfg: Dict[str, Any], job) -> JobResponse:
 @router.post("/jobs", response_model=JobResponse)
 def create_job(body: JobCreateRequest, request: Request):
     cfg = request.app.state.gateway_cfg
-    model_names = [m["name"] for m in request.app.state.models_cfg["models"]]
-    if body.model not in model_names:
-        raise HTTPException(400, f"Unknown model '{body.model}'")
+    if find_model(request.app.state.models_cfg, cfg, body.model) is None:
+        raise HTTPException(400, f"Unknown model '{body.model}'. Put model dir into /opt/llm-switchboard/models or /mnt/models.")
     if body.stream:
         raise HTTPException(400, "streaming not implemented in async mode yet")
     job = enqueue_chat_job(cfg, body.model_dump())
@@ -62,6 +62,8 @@ def get_job_result(job_id: str, request: Request):
         raise HTTPException(500, job.meta.get("error", "job failed"))
     if status == JobStatus.cancelled.value:
         raise HTTPException(409, "job cancelled")
+    if status == JobStatus.not_completed.value:
+        raise HTTPException(408, "не выполнено")
     raise HTTPException(202, "job not finished")
 
 
@@ -73,7 +75,7 @@ def cancel_job(job_id: str, request: Request):
         raise HTTPException(404, "job not found")
 
     status = job.meta.get("status", JobStatus.queued.value)
-    if status in {JobStatus.succeeded.value, JobStatus.failed.value, JobStatus.cancelled.value}:
+    if status in {JobStatus.succeeded.value, JobStatus.failed.value, JobStatus.cancelled.value, JobStatus.not_completed.value}:
         return {"id": job_id, "status": status}
 
     if job.get_status() == "queued":
