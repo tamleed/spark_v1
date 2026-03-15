@@ -37,7 +37,7 @@ locks:
 
 security:
   require_api_key: true
-  public_health_without_key: true
+  public_health_without_key: false
   cors_allow_origins: []
 
 network:
