@@ -89,6 +89,19 @@ docker compose --profile dgx-check up --abort-on-container-exit dgx-gpu-check
 
 ---
 
+
+## Сеть DGX без статического IP
+
+DGX Spark может работать без публичного статического IP (включая CGNAT), если есть Tailscale:
+- Публичный API: через `tailscale funnel` на `*.ts.net`
+- Приватный доступ (Jupyter/admin): через `tailscale serve` и/или SSH через tailnet
+- Используйте Tailscale IP/DNS устройства, а не ISP IP
+
+Проверить текущий Tailscale IP/DNS:
+```bash
+./scripts/print_tailscale_urls.sh
+```
+
 ## Tailscale
 
 ### Публичный API (Funnel)

@@ -43,6 +43,8 @@ security:
 network:
   public_access_mode: tailscale_funnel
   bind_localhost_only: true
+  dynamic_ip_supported: true
+  use_tailscale_for_public_endpoint: true
 
 docker:
   runtime: nvidia

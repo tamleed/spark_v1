@@ -6,3 +6,5 @@ sudo tailscale funnel --bg --https="$PORT" "$TARGET"
 URL=$(tailscale funnel status | awk '/https:/{print $2; exit}')
 echo "Public API URL: ${URL:-<check tailscale funnel status>}"
 echo "Disable: sudo tailscale funnel reset"
+
+echo "This setup is suitable for dynamic/CGNAT ISP links: Funnel publishes via Tailscale domain (*.ts.net), no static public IP needed."
