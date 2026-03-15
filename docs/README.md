@@ -1,73 +1,12 @@
 # LLM Switchboard for NVIDIA DGX Spark
 
-> Русскоязычная версия с расширенными комментариями: `docs/README_RUS.md`.
+> Русская версия с расширенными комментариями: `docs/README_RUS.md`.
 
-## Что внутри проекта
+## Deployment decision
+- Public access mode: **Tailscale Funnel (`https://<node>.ts.net`) + API key**.
+- Jupyter is **excluded** from this project scope.
 
-### Архитектура (разделена по контейнерам)
-- `redis` container: очередь и хранилище статусов/результатов jobs.
-- `gateway` container: внешний FastAPI API (`/v1/*`, `/jobs/*`, `/admin/*`).
-- `worker` container: последовательное выполнение задач из RQ (concurrency=1).
-- `vLLM backend` container: **динамически поднимается только для активной модели**.
-- `jupyter` отдельно (systemd, localhost-only).
-
-Это значит: падение модели не должно валить очередь или gateway.
-
-### Каталоги
-- `gateway/app/` — API, auth, маршруты, switcher, lock, прокси.
-- `worker/` — воркер и фоновые задачи.
-- `configs/` — `models.yaml`, `gateway.yaml`.
-- `docker/` — compose + Dockerfile + DGX daemon example.
-- `scripts/` — install/start/smoke/tailscale скрипты.
-- `systemd/` — unit files (Jupyter и совместимость).
-
----
-
-## Выбранный внешний доступ: `ts.net + API key`
-
-Оставляем основной публичный режим:
-- DGX публикует API через `tailscale funnel` (`https://<node>.ts.net`)
-- Все API-запросы идут с заголовком `X-API-Key`
-- `/health` тоже по ключу (по умолчанию)
-
-Это работает без статического ISP IP (подходит при dynamic IP/CGNAT).
-
----
-
-## Что и куда писать (обязательная настройка)
-
-### 1) `/etc/llm-gateway.env`
-```bash
-sudo cp .env.example /etc/llm-gateway.env
-sudo nano /etc/llm-gateway.env
-```
-
-Минимум заполнить:
-```env
-GATEWAY_API_KEY=<strong_random_key>
-ADMIN_API_KEY=<separate_admin_key>
-ALLOW_PUBLIC_HEALTH=false
-REDIS_URL=redis://127.0.0.1:6379/0
-MODELS_YAML_PATH=/opt/llm-switchboard/configs/models.yaml
-GATEWAY_YAML_PATH=/opt/llm-switchboard/configs/gateway.yaml
-MODEL_DISCOVERY_DIRS=/opt/llm-switchboard/models:/opt/llm-switchboard/model:/mnt/models
-HF_TOKEN=<optional_if_hf_private>
-```
-
-### 2) `configs/models.yaml`
-- Либо задайте модели явно,
-- либо просто кладите каталоги с весами в `models/`, `model/` или `/mnt/models` — они автообнаруживаются.
-
-### 3) `configs/gateway.yaml`
-Убедиться, что:
-- `network.public_access_mode: tailscale_funnel`
-- `security.require_api_key: true`
-- `security.public_health_without_key: false`
-
----
-
-## Быстрый запуск
-
+## Quick deploy (copy-paste)
 ```bash
 sudo mkdir -p /opt/llm-switchboard
 sudo rsync -a ./ /opt/llm-switchboard/
@@ -84,108 +23,198 @@ sudo nano /etc/llm-gateway.env
 ./scripts/print_tailscale_urls.sh
 ```
 
-После этого используйте URL из funnel status:
-`https://<your-node>.ts.net`
-
----
-
-## Примеры API для всех функций
-
-Ниже переменные:
-```bash
-API_BASE="https://<your-node>.ts.net"
-API_KEY="<your_api_key>"
-ADMIN_KEY="<your_admin_key>"
+## What to configure
+### `/etc/llm-gateway.env`
+```env
+GATEWAY_API_KEY=<primary_key>
+GATEWAY_API_KEYS=<key2,key3>     # optional multi-key list
+ADMIN_API_KEY=<admin_primary>
+ADMIN_API_KEYS=<admin2,admin3>   # optional multi-key list
+ALLOW_PUBLIC_HEALTH=false
+HF_TOKEN=
+REDIS_URL=redis://127.0.0.1:6379/0
+MODELS_YAML_PATH=/opt/llm-switchboard/configs/models.yaml
+GATEWAY_YAML_PATH=/opt/llm-switchboard/configs/gateway.yaml
+MODEL_DISCOVERY_DIRS=/opt/llm-switchboard/models:/opt/llm-switchboard/model:/mnt/models
 ```
 
-### 1) Health
+### `configs/gateway.yaml`
+- `security.require_api_key: true`
+- `security.public_health_without_key: false`
+- `network.public_access_mode: tailscale_funnel`
+
+### `configs/models.yaml`
+- add explicit models OR place weights into auto-discovery dirs.
+
+## API usage (all implemented functions)
+```bash
+API_BASE="https://<your-node>.ts.net"
+API_KEY="<user_key>"
+ADMIN_KEY="<admin_key>"
+```
+
+### 1) `GET /health`
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/health"
 ```
+Example response:
+```json
+{"ok": true, "redis": true}
+```
 
-### 2) List models
+### 2) `GET /v1/models`
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/v1/models"
 ```
+Example response:
+```json
+{
+  "object": "list",
+  "data": [{"id": "qwen3-30b", "object": "model"}],
+  "active_model": "qwen3-30b",
+  "backend_state": "ready",
+  "async_external_api": true
+}
+```
 
-### 3) Chat completion (async, по умолчанию)
+### 3) `POST /v1/chat/completions`
+All request params (implemented):
+- `model` (string, required)
+- `messages` (array, required)
+- `temperature` (number, optional)
+- `max_tokens` (int, optional)
+- `stream` (bool, optional)
+- `async` (bool, optional, default=true)
+
 ```bash
 curl -X POST "$API_BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
   -d '{
     "model":"qwen3-30b",
-    "messages":[{"role":"user","content":"Привет"}],
+    "messages":[
+      {"role":"system","content":"You are concise"},
+      {"role":"user","content":"Hello"}
+    ],
     "temperature":0.2,
     "max_tokens":128,
+    "stream":false,
     "async":true
   }'
 ```
+Async response example:
+```json
+{
+  "status": "accepted",
+  "job_id": "8f1...",
+  "status_url": "/jobs/8f1...",
+  "result_url": "/jobs/8f1.../result"
+}
+```
 
-### 4) Create job напрямую
+### 4) `POST /jobs`
+Request params:
+- `model`, `messages` required
+- `temperature`, `max_tokens`, `stream` optional
+
 ```bash
 curl -X POST "$API_BASE/jobs" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
   -d '{
     "model":"qwen3-30b",
-    "messages":[{"role":"user","content":"Сделай краткое резюме"}],
-    "max_tokens":256
+    "messages":[{"role":"user","content":"Summarize text"}],
+    "temperature":0.3,
+    "max_tokens":256,
+    "stream":false
   }'
 ```
+Example response:
+```json
+{
+  "id":"8f1...",
+  "status":"queued",
+  "requested_model":"qwen3-30b",
+  "created_at":"2026-01-01T00:00:00+00:00",
+  "started_at":null,
+  "finished_at":null,
+  "queue_position":1,
+  "progress":null,
+  "error":null
+}
+```
 
-### 5) Job status
+### 5) `GET /jobs/{id}`
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>"
 ```
+Possible `status` values:
+`queued | running | succeeded | failed | cancelled | not_completed`
 
-### 6) Job result
+### 6) `GET /jobs/{id}/result`
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>/result"
 ```
+Success example:
+```json
+{
+  "id":"chatcmpl-...",
+  "object":"chat.completion",
+  "choices":[{"index":0,"message":{"role":"assistant","content":"..."}}]
+}
+```
 
-### 7) Cancel job
+### 7) `POST /jobs/{id}/cancel`
 ```bash
 curl -X POST -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>/cancel"
 ```
+Example response:
+```json
+{"id":"8f1...","status":"cancelled"}
+```
 
-### 8) Extended status
+### 8) `GET /status` (admin)
 ```bash
 curl -H "X-API-Key: $ADMIN_KEY" "$API_BASE/status"
 ```
+Example:
+```json
+{"active_model":"qwen3-30b","switching":false,"backend_state":"ready","queue_length":0,"uptime":123,"containers_split":true}
+```
 
-### 9) Queue status
+### 9) `GET /queue` (admin)
 ```bash
 curl -H "X-API-Key: $ADMIN_KEY" "$API_BASE/queue"
 ```
+Example:
+```json
+{"queue_length":0,"current_job":null,"active_model":"qwen3-30b","switching":false,"drain_mode":false}
+```
 
-### 10) Admin switch model
+### 10) `POST /admin/switch` (admin)
 ```bash
 curl -X POST "$API_BASE/admin/switch" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ADMIN_KEY" \
   -d '{"model":"qwen3-30b"}'
 ```
+Example:
+```json
+{"mode":"queued_admin_job","job_id":"..."}
+```
 
-### 11) Admin drain mode
+### 11) `POST /admin/drain` (admin)
 ```bash
 curl -X POST -H "X-API-Key: $ADMIN_KEY" "$API_BASE/admin/drain"
 ```
+Example:
+```json
+{"drain_mode": true}
+```
 
----
-
-## Tailscale utility scripts
-
+## Useful scripts
 ```bash
 ./scripts/setup_tailscale_funnel.sh
 ./scripts/print_tailscale_urls.sh
-./scripts/setup_tailscale_serve_jupyter.sh
+GATEWAY_API_KEY='<key>' ./scripts/smoke_test.sh
 ```
-
----
-
-## Замечания по безопасности
-
-- Не публикуйте API без ключа.
-- Храните `GATEWAY_API_KEY` и `ADMIN_API_KEY` раздельно.
-- Funnel (`*.ts.net`) — публичный интернет endpoint, поэтому ключ обязателен для всех endpoint.

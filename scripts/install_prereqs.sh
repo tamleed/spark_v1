@@ -44,9 +44,4 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
-if [ ! -d /opt/jupyter-venv ]; then
-  sudo $PYTHON_BIN -m venv /opt/jupyter-venv
-fi
-sudo /opt/jupyter-venv/bin/pip install --upgrade pip jupyterlab
-
 echo "[OK] prerequisites installed for DGX Spark (Docker + NVIDIA runtime + Python envs)"
