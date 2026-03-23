@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from .locks import combined_lock
-from .model_registry import find_model
+from .model_registry import DEFAULT_DISCOVERY_IMAGE, find_model
 
 
 OOM_MARKERS = ["out of memory", "cuda out of memory", "cublas", "oom"]
@@ -31,6 +32,7 @@ class ModelSwitcher:
         self.models_cfg = models_cfg
         self.state = BackendState()
         self._prefix = os.getenv("BACKEND_CONTAINER_NAME_PREFIX", "llm-backend")
+        self._docker_bin = os.getenv("DOCKER_BIN", shutil.which("docker") or "docker")
 
     def get_active_model(self) -> Optional[str]:
         return self.state.active_model
@@ -41,6 +43,35 @@ class ModelSwitcher:
     def _run(self, cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, text=True, capture_output=True, check=check)
 
+    def _docker(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+        return self._run([self._docker_bin, *args], check=check)
+
+    def _default_image(self) -> str:
+        backend_cfg = self.cfg.get("inference_backend", {})
+        return os.getenv("VLLM_IMAGE") or backend_cfg.get("default_image") or DEFAULT_DISCOVERY_IMAGE
+
+    def _resolved_image(self, backend: Dict[str, Any]) -> str:
+        image = backend.get("image") or self._default_image()
+        if not image:
+            raise RuntimeError(
+                "No backend image configured. Set backend.image per model, VLLM_IMAGE, "
+                "or inference_backend.default_image."
+            )
+        return image
+
+    def _ensure_docker_access(self) -> None:
+        if not shutil.which(self._docker_bin) and not os.path.exists(self._docker_bin):
+            raise RuntimeError(
+                f"Docker CLI '{self._docker_bin}' is not available inside the orchestrator container. "
+                "Install docker-ce-cli and mount /var/run/docker.sock."
+            )
+        if not os.path.exists("/var/run/docker.sock"):
+            raise RuntimeError("Docker socket /var/run/docker.sock is not mounted into the orchestrator container")
+        probe = self._docker("version", "--format", "{{.Server.Version}}", check=False)
+        if probe.returncode != 0:
+            msg = probe.stderr.strip() or probe.stdout.strip() or "docker version failed"
+            raise RuntimeError(f"Docker daemon is not reachable from the orchestrator container: {msg}")
+
     def stop_current_model(self) -> None:
         if not self.state.container_name:
             self.state.active_model = None
@@ -49,9 +80,9 @@ class ModelSwitcher:
 
         graceful = int(self.cfg["switching"]["graceful_stop_timeout_sec"])
         name = self.state.container_name
-        self._run(["docker", "stop", "--time", str(graceful), name], check=False)
-        self._run(["docker", "kill", name], check=False)
-        self._run(["docker", "rm", "-f", name], check=False)
+        self._docker("stop", "--time", str(graceful), name, check=False)
+        self._docker("kill", name, check=False)
+        self._docker("rm", "-f", name, check=False)
 
         self.state.active_model = None
         self.state.container_name = None
@@ -62,19 +93,21 @@ class ModelSwitcher:
         if not model:
             raise ValueError(f"Unknown model: {model_name}")
 
+        self._ensure_docker_access()
+
         backend = model["backend"]
         port = str(backend.get("port", 8001))
-        image = backend.get("image", "nvcr.io/nvidia/vllm:25.11-py3")
+        image = self._resolved_image(backend)
         container_name = self._container_name(model_name)
         source = model["source"]["value"]
         vllm_args = backend.get("vllm_args", [])
 
         docker_cfg = self.cfg.get("docker", {})
         cmd = [
-            "docker", "run", "-d",
+            self._docker_bin, "run", "-d",
             "--name", container_name,
             "--runtime", os.getenv("DOCKER_RUNTIME", docker_cfg.get("runtime", "nvidia")),
-            "--gpus", "all",
+            "--gpus", os.getenv("DOCKER_GPUS", docker_cfg.get("gpus", "all")),
             "--network", os.getenv("DOCKER_NETWORK_MODE", docker_cfg.get("network_mode", "host")),
             "--ipc", os.getenv("DOCKER_IPC_MODE", docker_cfg.get("ipc_mode", "host")),
             "--shm-size", os.getenv("DOCKER_SHM_SIZE", docker_cfg.get("shm_size", "16g")),
@@ -110,6 +143,7 @@ class ModelSwitcher:
         self.state.container_name = container_name
         self.state.active_model = model_name
         self.state.backend_state = "starting"
+        self.state.last_error = None
 
     def _is_oom(self, text: str) -> bool:
         t = (text or "").lower()
@@ -137,7 +171,7 @@ class ModelSwitcher:
 
         logs = ""
         if self.state.container_name:
-            out = self._run(["docker", "logs", "--tail", "200", self.state.container_name], check=False)
+            out = self._docker("logs", "--tail", "200", self.state.container_name, check=False)
             logs = (out.stdout or "") + "\n" + (out.stderr or "")
         self.state.backend_state = "failed"
         self.state.last_error = logs[:2000]

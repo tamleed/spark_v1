@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict
 
 import httpx
 
-sys.path.append(str(Path(__file__).resolve().parents[1] / "gateway"))
-
-from app.config import load_config  # noqa: E402
-from app.model_registry import find_model  # noqa: E402
-from app.models import JobStatus  # noqa: E402
-from app.proxy import chat_completion  # noqa: E402
-from app.switcher import ModelSwitcher  # noqa: E402
+from gateway.app.config import load_config
+from gateway.app.model_registry import find_model
+from gateway.app.models import JobStatus
+from gateway.app.proxy import chat_completion
+from gateway.app.switcher import ModelSwitcher
 
 cfg_obj = load_config()
 gateway_cfg = cfg_obj.gateway

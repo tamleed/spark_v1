@@ -1,12 +1,27 @@
 # LLM Switchboard for NVIDIA DGX Spark
 
-> Русская версия с расширенными комментариями: `docs/README_RUS.md`.
+> Russian version: `docs/README_RUS.md`.
 
-## Deployment decision
-- Public access mode: **Tailscale Funnel (`https://<node>.ts.net`) + API key**.
-- Jupyter is **excluded** from this project scope.
+## Architecture
+- `gateway` accepts API traffic and exposes `/v1/chat/completions`, `/jobs/*`, `/status`, and `/queue`.
+- `worker` is a containerized orchestrator: it consumes RQ jobs from Redis, uses `ModelSwitcher` to stop the old backend container, start the next vLLM backend container, wait for readiness, and then proxy inference.
+- `redis` stores queue state and job metadata.
+- Backend model containers are **dynamic**. They are not permanent compose services; they are launched on-demand by the worker via host Docker.
 
-## Quick deploy (copy-paste)
+## DGX Spark deployment notes
+- DGX Spark is an ARM64 / Blackwell system. Use a Spark-compatible vLLM image/tag.
+- Default backend image resolution order:
+  1. `backend.image` in `configs/models.yaml`
+  2. `VLLM_IMAGE`
+  3. `inference_backend.default_image` in `configs/gateway.yaml`
+- This repo defaults to `nvcr.io/nvidia/vllm:26.02-py3`. Validate this tag on your Spark software stack and override it if your environment requires a different NGC tag.
+- The worker container needs:
+  - Docker CLI inside the image,
+  - `/var/run/docker.sock` mounted from the host,
+  - mounted model directories for discovery,
+  - host networking to talk to the backend container on `127.0.0.1:<port>`.
+
+## Quick deploy
 ```bash
 sudo mkdir -p /opt/llm-switchboard
 sudo rsync -a ./ /opt/llm-switchboard/
@@ -16,205 +31,205 @@ cd /opt/llm-switchboard
 sudo cp .env.example /etc/llm-gateway.env
 sudo nano /etc/llm-gateway.env
 
-./scripts/pull_vllm_image.sh
+./scripts/pull_vllm_image.sh   # prefetch only
 ./scripts/start_all.sh
-
-./scripts/setup_tailscale_funnel.sh
-./scripts/print_tailscale_urls.sh
 ```
 
-## What to configure
-### `/etc/llm-gateway.env`
+## Required environment
+`/etc/llm-gateway.env`
 ```env
 GATEWAY_API_KEY=<primary_key>
-GATEWAY_API_KEYS=<key2,key3>     # optional multi-key list
-ADMIN_API_KEY=<admin_primary>
-ADMIN_API_KEYS=<admin2,admin3>   # optional multi-key list
-ALLOW_PUBLIC_HEALTH=false
+ADMIN_API_KEY=<admin_key>
 HF_TOKEN=
 REDIS_URL=redis://127.0.0.1:6379/0
 MODELS_YAML_PATH=/opt/llm-switchboard/configs/models.yaml
 GATEWAY_YAML_PATH=/opt/llm-switchboard/configs/gateway.yaml
 MODEL_DISCOVERY_DIRS=/opt/llm-switchboard/models:/opt/llm-switchboard/model:/mnt/models
+VLLM_IMAGE=nvcr.io/nvidia/vllm:26.02-py3
+DOCKER_BIN=/usr/bin/docker
+DOCKER_RUNTIME=nvidia
+DOCKER_NETWORK_MODE=host
+DOCKER_IPC_MODE=host
+DOCKER_SHM_SIZE=16g
 ```
 
-### `configs/gateway.yaml`
-- `security.require_api_key: true`
-- `security.public_health_without_key: false`
-- `network.public_access_mode: tailscale_funnel`
+## Compose/runtime behavior
+- `docker compose up -d` starts `redis`, `gateway`, and `worker`.
+- `worker` runs as `python -m worker.worker`.
+- `gateway` and `worker` both use `PYTHONPATH=/app:/app/gateway`.
+- `gateway` and `worker` both mount the model discovery directories, so model discovery can update while the stack is already running.
+- `pull_vllm_image.sh` is only a prefetch helper; runtime image choice still comes from model config/env.
 
-### `configs/models.yaml`
-- add explicit models OR place weights into auto-discovery dirs.
+## Model switching flow
+1. Client calls `POST /v1/chat/completions`.
+2. Gateway enqueues `worker.tasks.execute_chat_job`.
+3. Worker marks the job `running`, resolves the model, and calls `ensure_model_active()`.
+4. `ModelSwitcher` stops the previous backend container, starts the requested vLLM backend container with GPU flags, and polls `http://127.0.0.1:<port>/v1/models`.
+5. Once ready, worker proxies inference to the backend and stores the result on the job.
 
-## API usage (all implemented functions)
+## Hot model discovery without restarting the stack
+Hot discovery works because `/v1/models` rebuilds the model list on every request and because the compose services now mount the host model directories.
+
+### To add a model while the stack is already running
+1. Copy the model directory into one of the discovery roots, for example:
 ```bash
-API_BASE="https://<your-node>.ts.net"
-API_KEY="<user_key>"
-ADMIN_KEY="<admin_key>"
+mkdir -p /opt/llm-switchboard/models/my-new-model
+# copy model files into /opt/llm-switchboard/models/my-new-model
+```
+2. Query the model list again:
+```bash
+curl -H "X-API-Key: $GATEWAY_API_KEY" http://127.0.0.1:8000/v1/models
+```
+3. The new directory name should appear as a model id without restarting `gateway` or `worker`.
+
+### Automated hot-discovery check
+```bash
+API_URL=http://127.0.0.1:8000 \
+GATEWAY_API_KEY='<key>' \
+./scripts/check_hot_model_discovery.sh
+```
+The script creates a temporary model directory under `/opt/llm-switchboard/models`, calls `/v1/models` again, and verifies that the model becomes visible without restarting the stack.
+
+## Readiness / validation commands
+### Base services
+```bash
+cd /opt/llm-switchboard/docker
+docker compose ps
+curl -H "X-API-Key: $GATEWAY_API_KEY" http://127.0.0.1:8000/health
 ```
 
-### 1) `GET /health`
+### Worker runtime checks
+```bash
+./scripts/check_worker_runtime.sh
+```
+This verifies:
+- `docker ps` works inside `worker`,
+- `import worker.tasks` works,
+- `from gateway.app.config import load_config` works.
+
+### GPU visibility
+```bash
+cd /opt/llm-switchboard/docker
+docker compose --profile dgx-check up dgx-gpu-check
+```
+
+### Model registry and switching
+```bash
+curl -H "X-API-Key: $GATEWAY_API_KEY" http://127.0.0.1:8000/v1/models
+curl -H "X-API-Key: $ADMIN_API_KEY" http://127.0.0.1:8000/status
+curl -H "X-API-Key: $ADMIN_API_KEY" http://127.0.0.1:8000/queue
+```
+
+## API test requests
+### Local on the server
+```bash
+API_BASE="http://127.0.0.1:8000"
+API_KEY="$GATEWAY_API_KEY"
+ADMIN_KEY="$ADMIN_API_KEY"
+```
+
+#### Health
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/health"
 ```
-Example response:
-```json
-{"ok": true, "redis": true}
-```
 
-### 2) `GET /v1/models`
+#### Model list
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/v1/models"
 ```
-Example response:
-```json
-{
-  "object": "list",
-  "data": [{"id": "qwen3-30b", "object": "model"}],
-  "active_model": "qwen3-30b",
-  "backend_state": "ready",
-  "async_external_api": true
-}
-```
 
-### 3) `POST /v1/chat/completions`
-All request params (implemented):
-- `model` (string, required)
-- `messages` (array, required)
-- `temperature` (number, optional)
-- `max_tokens` (int, optional)
-- `stream` (bool, optional)
-- `async` (bool, optional, default=true)
-
+#### Async chat completion
 ```bash
 curl -X POST "$API_BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
   -d '{
-    "model":"qwen3-30b",
-    "messages":[
-      {"role":"system","content":"You are concise"},
-      {"role":"user","content":"Hello"}
-    ],
-    "temperature":0.2,
-    "max_tokens":128,
+    "model":"gpt-oss-20b",
+    "messages":[{"role":"user","content":"Hello"}],
     "stream":false,
     "async":true
   }'
 ```
-Async response example:
-```json
-{
-  "status": "accepted",
-  "job_id": "8f1...",
-  "status_url": "/jobs/8f1...",
-  "result_url": "/jobs/8f1.../result"
-}
+
+#### Job status/result
+```bash
+curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>"
+curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>/result"
 ```
 
-### 4) `POST /jobs`
-Request params:
-- `model`, `messages` required
-- `temperature`, `max_tokens`, `stream` optional
+#### Admin status/queue
+```bash
+curl -H "X-API-Key: $ADMIN_KEY" "$API_BASE/status"
+curl -H "X-API-Key: $ADMIN_KEY" "$API_BASE/queue"
+```
+
+### From another computer via your domain name
+Replace `api.example.com` with your actual published host name (for example a Tailscale Funnel domain or your own reverse-proxied domain).
 
 ```bash
-curl -X POST "$API_BASE/jobs" \
+API_BASE="https://api.example.com"
+API_KEY="<gateway_key>"
+ADMIN_KEY="<admin_key>"
+```
+
+#### Health
+```bash
+curl -H "X-API-Key: $API_KEY" "$API_BASE/health"
+```
+
+#### Model list
+```bash
+curl -H "X-API-Key: $API_KEY" "$API_BASE/v1/models"
+```
+
+#### Async chat completion
+```bash
+curl -X POST "$API_BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
   -d '{
-    "model":"qwen3-30b",
-    "messages":[{"role":"user","content":"Summarize text"}],
-    "temperature":0.3,
-    "max_tokens":256,
-    "stream":false
+    "model":"gpt-oss-20b",
+    "messages":[{"role":"user","content":"Привет"}],
+    "stream":false,
+    "async":true
   }'
 ```
-Example response:
-```json
-{
-  "id":"8f1...",
-  "status":"queued",
-  "requested_model":"qwen3-30b",
-  "created_at":"2026-01-01T00:00:00+00:00",
-  "started_at":null,
-  "finished_at":null,
-  "queue_position":1,
-  "progress":null,
-  "error":null
-}
-```
 
-### 5) `GET /jobs/{id}`
+#### Job status/result
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>"
-```
-Possible `status` values:
-`queued | running | succeeded | failed | cancelled | not_completed`
-
-### 6) `GET /jobs/{id}/result`
-```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>/result"
 ```
-Success example:
-```json
-{
-  "id":"chatcmpl-...",
-  "object":"chat.completion",
-  "choices":[{"index":0,"message":{"role":"assistant","content":"..."}}]
-}
-```
 
-### 7) `POST /jobs/{id}/cancel`
-```bash
-curl -X POST -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>/cancel"
-```
-Example response:
-```json
-{"id":"8f1...","status":"cancelled"}
-```
-
-### 8) `GET /status` (admin)
+#### Admin status/queue
 ```bash
 curl -H "X-API-Key: $ADMIN_KEY" "$API_BASE/status"
-```
-Example:
-```json
-{"active_model":"qwen3-30b","switching":false,"backend_state":"ready","queue_length":0,"uptime":123,"containers_split":true}
-```
-
-### 9) `GET /queue` (admin)
-```bash
 curl -H "X-API-Key: $ADMIN_KEY" "$API_BASE/queue"
 ```
-Example:
-```json
-{"queue_length":0,"current_job":null,"active_model":"qwen3-30b","switching":false,"drain_mode":false}
+
+## End-to-end smoke test
+```bash
+API_URL=http://127.0.0.1:8000 \
+GATEWAY_API_KEY='<key>' \
+./scripts/smoke_test.sh
+```
+The smoke test exercises queueing, completion polling, and cancel. Adjust model names to match your deployment if needed.
+
+## Troubleshooting
+### `module 'worker' has no attribute 'tasks'`
+- Ensure `worker/__init__.py` exists and the worker service runs as `python -m worker.worker`.
+
+### `FileNotFoundError: 'docker'`
+- Worker image must contain Docker CLI and the worker service must mount `/var/run/docker.sock`.
+
+### Backend never becomes ready
+- Inspect worker logs and backend logs:
+```bash
+cd /opt/llm-switchboard/docker
+docker compose logs --tail=200 worker
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+docker logs --tail=200 llm-backend-<model-name>
 ```
 
-### 10) `POST /admin/switch` (admin)
-```bash
-curl -X POST "$API_BASE/admin/switch" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $ADMIN_KEY" \
-  -d '{"model":"qwen3-30b"}'
-```
-Example:
-```json
-{"mode":"queued_admin_job","job_id":"..."}
-```
-
-### 11) `POST /admin/drain` (admin)
-```bash
-curl -X POST -H "X-API-Key: $ADMIN_KEY" "$API_BASE/admin/drain"
-```
-Example:
-```json
-{"drain_mode": true}
-```
-
-## Useful scripts
-```bash
-./scripts/setup_tailscale_funnel.sh
-./scripts/print_tailscale_urls.sh
-GATEWAY_API_KEY='<key>' ./scripts/smoke_test.sh
-```
+### Auto-discovery does not find host model directories
+- Keep weights in `/mnt/models`, `/opt/llm-switchboard/models`, or `/opt/llm-switchboard/model`, or mount additional host paths consistently into both `gateway` and `worker`.
