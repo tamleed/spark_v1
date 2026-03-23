@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 
 DEFAULT_DISCOVERY_DIRS = ["/opt/llm-switchboard/models", "/opt/llm-switchboard/model", "/mnt/models"]
+DEFAULT_DISCOVERY_IMAGE = "nvcr.io/nvidia/vllm:26.02-py3"
 
 
 def _dirs_from_env() -> List[str]:
@@ -15,9 +16,17 @@ def _dirs_from_env() -> List[str]:
     return [d.strip() for d in raw.split(":") if d.strip()]
 
 
+def _default_backend_image(cfg: Dict[str, Any]) -> str:
+    backend_cfg = cfg.get("inference_backend", {})
+    return (
+        os.getenv("VLLM_IMAGE")
+        or backend_cfg.get("default_image")
+        or DEFAULT_DISCOVERY_IMAGE
+    )
+
+
 def discover_local_models(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    docker_cfg = cfg.get("docker", {})
-    default_image = os.getenv("VLLM_IMAGE", "nvcr.io/nvidia/vllm:25.11-py3")
+    default_image = _default_backend_image(cfg)
     default_port = int(cfg.get("inference_backend", {}).get("default_port", 8001))
     default_vllm_args = cfg.get("inference_backend", {}).get("default_vllm_args", ["--dtype", "bfloat16", "--max-model-len", "8192"])
 

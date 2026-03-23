@@ -1,7 +1,22 @@
 # LLM Switchboard для NVIDIA DGX Spark (РУС)
 
-> Режим по умолчанию: **Tailscale Funnel (`*.ts.net`) + API key**.
-> Jupyter из текущего проекта исключён.
+## Architecture
+- `gateway` — HTTP/API слой. Принимает запросы, валидирует ключи, публикует `/v1/chat/completions`, `/jobs/*`, `/status`, `/queue`.
+- `worker` — **контейнерный orchestrator** backend-контейнеров. Он забирает job из Redis/RQ, переключает модель и управляет backend-контейнерами через Docker daemon хоста.
+- `ModelSwitcher` останавливает старый backend, запускает новый vLLM backend-контейнер, ждёт readiness через `/v1/models`, затем inference идёт через proxy.
+- `redis` хранит очередь и метаданные job.
+
+## Заметки по DGX Spark
+- DGX Spark — это ARM64 / Blackwell платформа. Для неё нужен **совместимый** backend image vLLM.
+- Выбор backend image происходит так:
+  1. `backend.image` в `configs/models.yaml`
+  2. `VLLM_IMAGE`
+  3. `inference_backend.default_image` в `configs/gateway.yaml`
+- В репозитории по умолчанию стоит `nvcr.io/nvidia/vllm:26.02-py3`, но на Spark это надо валидировать под ваш стек и при необходимости переопределять.
+- Worker-контейнеру нужны:
+  - Docker CLI внутри image,
+  - mounted `/var/run/docker.sock`,
+  - mounted директории моделей.
 
 ## Быстрый деплой
 ```bash
@@ -13,162 +28,94 @@ cd /opt/llm-switchboard
 sudo cp .env.example /etc/llm-gateway.env
 sudo nano /etc/llm-gateway.env
 
-./scripts/pull_vllm_image.sh
+./scripts/pull_vllm_image.sh   # только prefetch
 ./scripts/start_all.sh
-
-./scripts/setup_tailscale_funnel.sh
-./scripts/print_tailscale_urls.sh
 ```
 
-## Что и куда писать
-
-### `/etc/llm-gateway.env`
+## Обязательные переменные
+`/etc/llm-gateway.env`
 ```env
-GATEWAY_API_KEY=<основной_ключ>
-GATEWAY_API_KEYS=<ключ2,ключ3>     # опционально
-ADMIN_API_KEY=<admin_ключ>
-ADMIN_API_KEYS=<admin2,admin3>     # опционально
-ALLOW_PUBLIC_HEALTH=false
+GATEWAY_API_KEY=<user_key>
+ADMIN_API_KEY=<admin_key>
 HF_TOKEN=
 REDIS_URL=redis://127.0.0.1:6379/0
 MODELS_YAML_PATH=/opt/llm-switchboard/configs/models.yaml
 GATEWAY_YAML_PATH=/opt/llm-switchboard/configs/gateway.yaml
 MODEL_DISCOVERY_DIRS=/opt/llm-switchboard/models:/opt/llm-switchboard/model:/mnt/models
+VLLM_IMAGE=nvcr.io/nvidia/vllm:26.02-py3
+DOCKER_BIN=/usr/bin/docker
+DOCKER_RUNTIME=nvidia
+DOCKER_NETWORK_MODE=host
+DOCKER_IPC_MODE=host
+DOCKER_SHM_SIZE=16g
 ```
 
-### `configs/gateway.yaml`
-Проверьте:
-- `security.require_api_key: true`
-- `security.public_health_without_key: false`
-- `network.public_access_mode: tailscale_funnel`
+## Runtime / compose
+- `docker compose up -d` поднимает `redis`, `gateway`, `worker`.
+- `worker` запускается как `python -m worker.worker` и имеет доступ к Docker socket.
+- `gateway` и `worker` используют `PYTHONPATH=/app:/app/gateway`, поэтому импорты пакетов консистентны.
+- `pull_vllm_image.sh` — это только prefetch helper; реальный backend image выбирается в runtime из model config/env.
 
-### `configs/models.yaml`
-- либо явное описание моделей,
-- либо складывайте веса в автопоиск (`models`, `model`, `/mnt/models`).
+## Как работает model switching
+1. Клиент вызывает `POST /v1/chat/completions`.
+2. Gateway ставит `worker.tasks.execute_chat_job` в очередь.
+3. Worker переводит job в `running`, вызывает `ensure_model_active()` и выбирает модель.
+4. `ModelSwitcher` останавливает старый backend, запускает новый vLLM backend-контейнер с GPU-флагами и ждёт ответа `http://127.0.0.1:<port>/v1/models`.
+5. После readiness worker проксирует inference в backend.
 
----
-
-## Примеры API (все функции)
-
+## Проверки / readiness
+### Базовые сервисы
 ```bash
-API_BASE="https://<your-node>.ts.net"
-API_KEY="<user_key>"
-ADMIN_KEY="<admin_key>"
+cd /opt/llm-switchboard/docker
+docker compose ps
+curl -H "X-API-Key: $GATEWAY_API_KEY" http://127.0.0.1:8000/health
 ```
 
-### 1) Health
+### Проверка worker runtime
 ```bash
-curl -H "X-API-Key: $API_KEY" "$API_BASE/health"
+./scripts/check_worker_runtime.sh
 ```
-Пример ответа:
-```json
-{"ok": true, "redis": true}
-```
+Скрипт проверяет:
+- `docker ps` внутри `worker`,
+- `import worker.tasks`,
+- `from gateway.app.config import load_config`.
 
-### 2) Список моделей
+### Проверка GPU
 ```bash
-curl -H "X-API-Key: $API_KEY" "$API_BASE/v1/models"
-```
-Пример:
-```json
-{
-  "object":"list",
-  "data":[{"id":"qwen3-30b","object":"model"}],
-  "active_model":"qwen3-30b",
-  "backend_state":"ready",
-  "async_external_api":true
-}
+cd /opt/llm-switchboard/docker
+docker compose --profile dgx-check up dgx-gpu-check
 ```
 
-### 3) Chat completion
-Параметры:
-- `model` (обязательно)
-- `messages` (обязательно)
-- `temperature` (опц.)
-- `max_tokens` (опц.)
-- `stream` (опц.)
-- `async` (опц., default=true)
-
+### Проверка model registry / switching
 ```bash
-curl -X POST "$API_BASE/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $API_KEY" \
-  -d '{
-    "model":"qwen3-30b",
-    "messages":[
-      {"role":"system","content":"You are concise"},
-      {"role":"user","content":"Привет"}
-    ],
-    "temperature":0.2,
-    "max_tokens":128,
-    "stream":false,
-    "async":true
-  }'
-```
-Пример ответа:
-```json
-{"status":"accepted","job_id":"8f1...","status_url":"/jobs/8f1...","result_url":"/jobs/8f1.../result"}
+curl -H "X-API-Key: $GATEWAY_API_KEY" http://127.0.0.1:8000/v1/models
+curl -H "X-API-Key: $ADMIN_API_KEY" http://127.0.0.1:8000/status
+curl -H "X-API-Key: $ADMIN_API_KEY" http://127.0.0.1:8000/queue
 ```
 
-### 4) Создать job напрямую
+### End-to-end smoke test
 ```bash
-curl -X POST "$API_BASE/jobs" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $API_KEY" \
-  -d '{
-    "model":"qwen3-30b",
-    "messages":[{"role":"user","content":"Сделай резюме"}],
-    "temperature":0.3,
-    "max_tokens":256,
-    "stream":false
-  }'
+API_URL=http://127.0.0.1:8000 \
+GATEWAY_API_KEY='<key>' \
+./scripts/smoke_test.sh
 ```
+Smoke test проверяет enqueue/poll/cancel. Имена моделей в smoke test должны совпадать с вашим deployment.
 
-### 5) Статус job
+## Troubleshooting
+### `module 'worker' has no attribute 'tasks'`
+- Убедитесь, что есть `worker/__init__.py` и worker запускается как `python -m worker.worker`.
+
+### `FileNotFoundError: 'docker'`
+- В worker image должен быть Docker CLI, а в worker service — mounted `/var/run/docker.sock`.
+
+### Backend не становится ready
+- Смотрите логи worker и backend-контейнера:
 ```bash
-curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>"
-```
-Возможные статусы:
-`queued | running | succeeded | failed | cancelled | not_completed`
-
-### 6) Результат job
-```bash
-curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>/result"
+cd /opt/llm-switchboard/docker
+docker compose logs --tail=200 worker
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+docker logs --tail=200 llm-backend-<model-name>
 ```
 
-### 7) Отмена job
-```bash
-curl -X POST -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>/cancel"
-```
-
-### 8) Расширенный статус (admin)
-```bash
-curl -H "X-API-Key: $ADMIN_KEY" "$API_BASE/status"
-```
-
-### 9) Очередь (admin)
-```bash
-curl -H "X-API-Key: $ADMIN_KEY" "$API_BASE/queue"
-```
-
-### 10) Переключение модели (admin)
-```bash
-curl -X POST "$API_BASE/admin/switch" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $ADMIN_KEY" \
-  -d '{"model":"qwen3-30b"}'
-```
-
-### 11) Drain mode (admin)
-```bash
-curl -X POST -H "X-API-Key: $ADMIN_KEY" "$API_BASE/admin/drain"
-```
-
----
-
-## Полезные команды
-```bash
-./scripts/setup_tailscale_funnel.sh
-./scripts/print_tailscale_urls.sh
-GATEWAY_API_KEY='<key>' ./scripts/smoke_test.sh
-```
+### Автопоиск моделей не видит директории
+- Автопоиск работает только по mounted директориям. Держите веса в `/mnt/models`, `/opt/llm-switchboard/models`, `/opt/llm-switchboard/model` или монтируйте дополнительные host paths консистентно.
