@@ -26,6 +26,7 @@ inference:
 
 inference_backend:
   default_port: 8001
+  default_image: nvcr.io/nvidia/vllm:26.02-py3
   default_vllm_args:
     - --dtype
     - bfloat16
@@ -48,6 +49,7 @@ network:
 
 docker:
   runtime: nvidia
+  gpus: all
   network_mode: host
   ipc_mode: host
   shm_size: 16g

@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   redis:
     image: redis:7-alpine
@@ -24,6 +22,12 @@ services:
       - REDIS_URL=redis://127.0.0.1:6379/0
       - MODELS_YAML_PATH=/app/configs/models.yaml
       - GATEWAY_YAML_PATH=/app/configs/gateway.yaml
+      - PYTHONPATH=/app:/app/gateway
+    volumes:
+      - ../gateway:/app/gateway
+      - ../configs:/app/configs
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     command: ["uvicorn", "gateway.app.main:app", "--host", "127.0.0.1", "--port", "8000"]
     depends_on:
       - redis
@@ -41,7 +45,18 @@ services:
       - REDIS_URL=redis://127.0.0.1:6379/0
       - MODELS_YAML_PATH=/app/configs/models.yaml
       - GATEWAY_YAML_PATH=/app/configs/gateway.yaml
-    command: ["python", "/app/worker/worker.py"]
+      - PYTHONPATH=/app:/app/gateway
+    volumes:
+      - ../worker:/app/worker
+      - ../gateway:/app/gateway
+      - ../configs:/app/configs
+      - /mnt/models:/mnt/models
+      - /opt/llm-switchboard/models:/opt/llm-switchboard/models
+      - /opt/llm-switchboard/model:/opt/llm-switchboard/model
+      - /var/lib/huggingface:/var/lib/huggingface
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["python", "-m", "worker.worker"]
     depends_on:
       - redis
 
