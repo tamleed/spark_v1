@@ -13,6 +13,7 @@ router = APIRouter(prefix="/v1", tags=["openai"])
 @router.get("/models")
 def list_models(request: Request):
     request.app.state.model_list = build_model_list(request.app.state.models_cfg, request.app.state.gateway_cfg)
+    request.app.state.switcher.sync_state_with_docker(check_readiness=False)
     models = request.app.state.model_list
     switcher = request.app.state.switcher
     return {
@@ -51,9 +52,11 @@ async def create_chat_completion(body: ChatCompletionRequest, request: Request):
     if q.count > 0 or switcher.state.switching or switcher.state.active_model != body.model:
         raise HTTPException(409, "Queue not empty or model switch required; use async")
 
+    backend_payload = body.model_dump(by_alias=True, exclude={"async_mode"})
+    backend_payload["model"] = model["source"]["value"]
     result = await chat_completion(
         backend_port=int(model["backend"].get("port", 8001)),
-        payload=body.model_dump(by_alias=True, exclude={"async_mode"}),
+        payload=backend_payload,
         timeout_sec=int(cfg["inference"]["inference_timeout_sec"]),
     )
     return result

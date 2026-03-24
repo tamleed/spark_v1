@@ -38,6 +38,7 @@ app.state.gateway_cfg = cfg.gateway
 app.state.models_cfg = cfg.models
 app.state.model_list = build_model_list(cfg.models, cfg.gateway)
 app.state.switcher = ModelSwitcher(cfg.gateway, cfg.models)
+app.state.switcher.sync_state_with_docker(check_readiness=True)
 app.state.started_at = time.time()
 app.state.current_job_id = None
 app.state.drain_mode = False

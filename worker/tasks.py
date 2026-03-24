@@ -1,25 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict
 
 import httpx
 
-sys.path.append(str(Path(__file__).resolve().parents[1] / "gateway"))
-
-from app.config import load_config  # noqa: E402
-from app.model_registry import find_model  # noqa: E402
-from app.models import JobStatus  # noqa: E402
-from app.proxy import chat_completion  # noqa: E402
-from app.switcher import ModelSwitcher  # noqa: E402
+from gateway.app.config import load_config
+from gateway.app.model_registry import find_model
+from gateway.app.models import JobStatus
+from gateway.app.proxy import chat_completion
+from gateway.app.switcher import ModelSwitcher
 
 cfg_obj = load_config()
 gateway_cfg = cfg_obj.gateway
 models_cfg = cfg_obj.models
 switcher = ModelSwitcher(gateway_cfg, models_cfg)
+switcher.sync_state_with_docker(check_readiness=True)
 
 
 def execute_chat_job(payload: Dict[str, Any]):
@@ -38,9 +35,11 @@ def execute_chat_job(payload: Dict[str, Any]):
         model = find_model(models_cfg, gateway_cfg, model_name)
         if model is None:
             raise ValueError(f"Unknown model: {model_name}")
+        backend_payload = {k: v for k, v in payload.items() if k != "async"}
+        backend_payload["model"] = model["source"]["value"]
         return await chat_completion(
             backend_port=int(model["backend"].get("port", 8001)),
-            payload={k: v for k, v in payload.items() if k != "async"},
+            payload=backend_payload,
             timeout_sec=inference_timeout,
         )
 
