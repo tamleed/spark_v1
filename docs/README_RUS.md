@@ -113,6 +113,21 @@ GATEWAY_API_KEY='<key>' \
 ```
 Скрипт создаёт backend/job, перезапускает `gateway` и `worker`, потом отправляет повторную job и проверяет, что не возникает `Conflict. The container name ... is already in use`.
 
+Если большая модель (например 120B) долго грузится, зафиксируйте более короткий timeout и/или выберите меньшую модель:
+```bash
+MODEL=gpt-oss20b JOB_TIMEOUT_SEC=180 ./scripts/check_backend_lifecycle_restart.sh
+```
+
+### Проверка двух разных моделей (например gpt-oss20b и qwen3)
+```bash
+API_URL=http://127.0.0.1:8000 \
+GATEWAY_API_KEY='<key>' \
+MODEL_A='gpt-oss20b' \
+MODEL_B='qwen3' \
+./scripts/check_two_models.sh
+```
+Скрипт отправляет два async-запроса подряд в разные модели и печатает result каждой job.
+
 ### Проверка GPU
 ```bash
 cd /opt/llm-switchboard/docker

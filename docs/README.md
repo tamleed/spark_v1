@@ -115,6 +115,21 @@ GATEWAY_API_KEY='<key>' \
 ```
 This script creates a backend/job, restarts `gateway` and `worker`, then submits a second job and verifies there is no `Conflict. The container name ... is already in use`.
 
+If a large model (for example 120B) takes too long to load, use a smaller model and/or shorter timeout:
+```bash
+MODEL=gpt-oss20b JOB_TIMEOUT_SEC=180 ./scripts/check_backend_lifecycle_restart.sh
+```
+
+### Two-model availability check (for example gpt-oss20b and qwen3)
+```bash
+API_URL=http://127.0.0.1:8000 \
+GATEWAY_API_KEY='<key>' \
+MODEL_A='gpt-oss20b' \
+MODEL_B='qwen3' \
+./scripts/check_two_models.sh
+```
+This submits two async requests back-to-back to different models and prints each job result.
+
 ### GPU visibility
 ```bash
 cd /opt/llm-switchboard/docker

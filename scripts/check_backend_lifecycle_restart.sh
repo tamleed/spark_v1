@@ -5,6 +5,8 @@ API_URL="${API_URL:-http://127.0.0.1:8000}"
 API_KEY="${GATEWAY_API_KEY:-${API_KEY:-}}"
 MODEL="${MODEL:-}"
 COMPOSE_DIR="${COMPOSE_DIR:-/opt/llm-switchboard/docker}"
+JOB_TIMEOUT_SEC="${JOB_TIMEOUT_SEC:-240}"
+POLL_SEC="${POLL_SEC:-2}"
 
 if [ -z "${API_KEY}" ]; then
   echo "[ERR] Set GATEWAY_API_KEY or API_KEY" >&2
@@ -35,13 +37,19 @@ submit_job() {
 
 wait_job() {
   local job_id="$1"
-  local timeout_sec="${2:-300}"
+  local timeout_sec="${2:-${JOB_TIMEOUT_SEC}}"
   local deadline=$((SECONDS + timeout_sec))
+  local last_status=""
+  local poll_count=0
   while [ "$SECONDS" -lt "$deadline" ]; do
     local meta
     meta="$(curl -fsS -H "X-API-Key: ${API_KEY}" "${API_URL}/jobs/${job_id}")"
     local status
     status="$(echo "$meta" | jq -r '.status')"
+    if [ "${status}" != "${last_status}" ]; then
+      echo "[INFO] job ${job_id} status=${status}"
+      last_status="${status}"
+    fi
     if [ "${status}" = "succeeded" ]; then
       return 0
     fi
@@ -50,9 +58,13 @@ wait_job() {
       echo "$meta" >&2
       return 1
     fi
-    sleep 2
+    poll_count=$((poll_count + 1))
+    if [ $((poll_count % 15)) -eq 0 ]; then
+      echo "[INFO] still waiting for ${job_id} ..."
+    fi
+    sleep "${POLL_SEC}"
   done
-  echo "[ERR] timeout waiting for job ${job_id}" >&2
+  echo "[ERR] timeout waiting for job ${job_id} (${timeout_sec}s). Try a smaller model or increase JOB_TIMEOUT_SEC." >&2
   return 1
 }
 
@@ -60,7 +72,7 @@ echo "[INFO] using model: ${MODEL}"
 
 job1="$(submit_job "${MODEL}")"
 echo "[INFO] job1=${job1}"
-wait_job "${job1}" 600
+wait_job "${job1}" "${JOB_TIMEOUT_SEC}"
 
 echo "[INFO] restarting gateway/worker..."
 (
@@ -77,6 +89,6 @@ done
 
 job2="$(submit_job "${MODEL}")"
 echo "[INFO] job2=${job2}"
-wait_job "${job2}" 600
+wait_job "${job2}" "${JOB_TIMEOUT_SEC}"
 
 echo "[OK] backend lifecycle survives gateway/worker restart without container name conflicts"
