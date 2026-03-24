@@ -220,6 +220,9 @@ Smoke test проверяет enqueue, poll и cancel. При необходим
 ### `FileNotFoundError: 'docker'`
 - В worker image должен быть Docker CLI, а в worker service — mounted `/var/run/docker.sock`.
 
+### Backend возвращает "The model `<name>` does not exist"
+- Это происходит, когда backend ожидает реальный идентификатор/путь модели, а gateway отправил алиас. Gateway/worker теперь переписывают `model` в backend payload на `model.source.value`, чтобы имена в switchboard и backend совпадали.
+
 ### Backend не становится ready
 - Смотрите логи worker и backend:
 ```bash

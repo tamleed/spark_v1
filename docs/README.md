@@ -222,6 +222,9 @@ The smoke test exercises queueing, completion polling, and cancel. Adjust model 
 ### `FileNotFoundError: 'docker'`
 - Worker image must contain Docker CLI and the worker service must mount `/var/run/docker.sock`.
 
+### Backend returns "The model `<name>` does not exist"
+- This happens when the backend expects the real loaded model id/path while gateway forwarded an alias. The gateway/worker now rewrites `model` in backend payload to `model.source.value` so backend and switchboard naming stay consistent.
+
 ### Backend never becomes ready
 - Inspect worker logs and backend logs:
 ```bash

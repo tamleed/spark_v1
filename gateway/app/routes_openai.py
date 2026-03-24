@@ -51,9 +51,11 @@ async def create_chat_completion(body: ChatCompletionRequest, request: Request):
     if q.count > 0 or switcher.state.switching or switcher.state.active_model != body.model:
         raise HTTPException(409, "Queue not empty or model switch required; use async")
 
+    backend_payload = body.model_dump(by_alias=True, exclude={"async_mode"})
+    backend_payload["model"] = model["source"]["value"]
     result = await chat_completion(
         backend_port=int(model["backend"].get("port", 8001)),
-        payload=body.model_dump(by_alias=True, exclude={"async_mode"}),
+        payload=backend_payload,
         timeout_sec=int(cfg["inference"]["inference_timeout_sec"]),
     )
     return result

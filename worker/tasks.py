@@ -34,9 +34,11 @@ def execute_chat_job(payload: Dict[str, Any]):
         model = find_model(models_cfg, gateway_cfg, model_name)
         if model is None:
             raise ValueError(f"Unknown model: {model_name}")
+        backend_payload = {k: v for k, v in payload.items() if k != "async"}
+        backend_payload["model"] = model["source"]["value"]
         return await chat_completion(
             backend_port=int(model["backend"].get("port", 8001)),
-            payload={k: v for k, v in payload.items() if k != "async"},
+            payload=backend_payload,
             timeout_sec=inference_timeout,
         )
 
