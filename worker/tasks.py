@@ -16,6 +16,7 @@ cfg_obj = load_config()
 gateway_cfg = cfg_obj.gateway
 models_cfg = cfg_obj.models
 switcher = ModelSwitcher(gateway_cfg, models_cfg)
+switcher.sync_state_with_docker(check_readiness=True)
 
 
 def execute_chat_job(payload: Dict[str, Any]):

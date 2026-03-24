@@ -15,6 +15,8 @@ from .model_registry import DEFAULT_DISCOVERY_IMAGE, find_model
 
 
 OOM_MARKERS = ["out of memory", "cuda out of memory", "cublas", "oom"]
+MODEL_LABEL_KEY = "llm.switchboard.model"
+SOURCE_LABEL_KEY = "llm.switchboard.source"
 
 
 @dataclass
@@ -45,6 +47,12 @@ class ModelSwitcher:
 
     def _docker(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         return self._run([self._docker_bin, *args], check=check)
+
+    def _docker_stdout(self, *args: str) -> str:
+        proc = self._docker(*args, check=False)
+        if proc.returncode != 0:
+            return ""
+        return (proc.stdout or "").strip()
 
     def _default_image(self) -> str:
         backend_cfg = self.cfg.get("inference_backend", {})
@@ -88,6 +96,94 @@ class ModelSwitcher:
         self.state.container_name = None
         self.state.backend_state = "stopped"
 
+    def _container_model_from_name(self, container_name: str) -> Optional[str]:
+        prefix = f"{self._prefix}-"
+        if not container_name.startswith(prefix):
+            return None
+        return container_name[len(prefix) :].replace("-", "_")
+
+    def _inspect_container(self, container_name: str) -> Optional[Dict[str, Any]]:
+        raw = self._docker_stdout("inspect", container_name, "--format", "{{json .}}")
+        if not raw:
+            return None
+        try:
+            import json
+
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    async def _is_backend_usable(self, model_name: str, source: str, port: int) -> bool:
+        container_name = self._container_name(model_name)
+        info = self._inspect_container(container_name)
+        if not info:
+            return False
+        if not info.get("State", {}).get("Running"):
+            return False
+        url = f"http://127.0.0.1:{port}/v1/models"
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(url)
+            if resp.status_code != 200:
+                return False
+            payload = resp.json()
+            ids = [m.get("id") for m in payload.get("data", []) if isinstance(m, dict)]
+            return source in ids
+        except Exception:
+            return False
+
+    def sync_state_with_docker(self, check_readiness: bool = False) -> None:
+        try:
+            self._ensure_docker_access()
+        except Exception as exc:
+            self.state.last_error = str(exc)
+            return
+
+        names_raw = self._docker_stdout(
+            "ps",
+            "-a",
+            "--filter",
+            f"name=^/{self._prefix}-",
+            "--format",
+            "{{.Names}}",
+        )
+        names = [n.strip() for n in names_raw.splitlines() if n.strip()]
+        if not names:
+            self.state.active_model = None
+            self.state.container_name = None
+            self.state.backend_state = "stopped"
+            return
+
+        selected = self.state.container_name if self.state.container_name in names else names[0]
+        info = self._inspect_container(selected)
+        if not info:
+            return
+        labels = info.get("Config", {}).get("Labels", {}) or {}
+        model_name = labels.get(MODEL_LABEL_KEY) or self._container_model_from_name(selected)
+        running = bool(info.get("State", {}).get("Running"))
+
+        self.state.container_name = selected
+        self.state.active_model = model_name
+        self.state.backend_state = "running" if running else "stopped"
+        if not running:
+            return
+
+        if check_readiness and model_name:
+            model = find_model(self.models_cfg, self.cfg, model_name)
+            if model:
+                port = int(model["backend"].get("port", 8001))
+                source = model["source"]["value"]
+                try:
+                    # sync context: lightweight readiness probe without async machinery
+                    with httpx.Client(timeout=2.0) as client:
+                        resp = client.get(f"http://127.0.0.1:{port}/v1/models")
+                    if resp.status_code == 200:
+                        payload = resp.json()
+                        ids = [m.get("id") for m in payload.get("data", []) if isinstance(m, dict)]
+                        self.state.backend_state = "ready" if source in ids else "running"
+                except Exception:
+                    self.state.backend_state = "running"
+
     def start_model(self, model_name: str) -> None:
         model = find_model(self.models_cfg, self.cfg, model_name)
         if not model:
@@ -121,6 +217,8 @@ class ModelSwitcher:
             "-e", "TRANSFORMERS_CACHE=/var/lib/huggingface",
             "-e", "NVIDIA_VISIBLE_DEVICES=all",
             "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+            "--label", f"{MODEL_LABEL_KEY}={model_name}",
+            "--label", f"{SOURCE_LABEL_KEY}={source}",
         ]
 
         hf_token = os.getenv("HF_TOKEN")
@@ -144,6 +242,30 @@ class ModelSwitcher:
         self.state.active_model = model_name
         self.state.backend_state = "starting"
         self.state.last_error = None
+
+    async def _prepare_target_container(self, model_name: str) -> bool:
+        model = find_model(self.models_cfg, self.cfg, model_name)
+        if not model:
+            raise ValueError(f"Unknown model: {model_name}")
+        container_name = self._container_name(model_name)
+        source = model["source"]["value"]
+        port = int(model["backend"].get("port", 8001))
+
+        existing = self._inspect_container(container_name)
+        if not existing:
+            return False
+
+        if await self._is_backend_usable(model_name, source, port):
+            self.state.container_name = container_name
+            self.state.active_model = model_name
+            self.state.backend_state = "ready"
+            self.state.last_error = None
+            return True
+
+        graceful = int(self.cfg["switching"]["graceful_stop_timeout_sec"])
+        self._docker("stop", "--time", str(graceful), container_name, check=False)
+        self._docker("rm", "-f", container_name, check=False)
+        return False
 
     def _is_oom(self, text: str) -> bool:
         t = (text or "").lower()
@@ -181,15 +303,20 @@ class ModelSwitcher:
         raise TimeoutError(f"Backend did not become ready in {timeout}s. Logs: {logs[:2000]}")
 
     async def ensure_model_active(self, model_name: str, file_lock_path: str) -> None:
+        self.sync_state_with_docker(check_readiness=True)
         if self.state.active_model == model_name and self.state.backend_state == "ready":
             return
 
         self.state.switching = True
         try:
             async with combined_lock(file_lock_path):
+                self.sync_state_with_docker(check_readiness=True)
                 if self.state.active_model == model_name and self.state.backend_state == "ready":
                     return
-                self.stop_current_model()
+                if await self._prepare_target_container(model_name):
+                    return
+                if self.state.container_name and self.state.container_name != self._container_name(model_name):
+                    self.stop_current_model()
                 self.start_model(model_name)
                 await self.wait_backend_ready(model_name)
         finally:

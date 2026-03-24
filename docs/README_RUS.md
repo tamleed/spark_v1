@@ -105,6 +105,14 @@ curl -H "X-API-Key: $GATEWAY_API_KEY" http://127.0.0.1:8000/health
 - `import worker.tasks`,
 - `from gateway.app.config import load_config`.
 
+### Smoke test lifecycle после restart gateway/worker
+```bash
+API_URL=http://127.0.0.1:8000 \
+GATEWAY_API_KEY='<key>' \
+./scripts/check_backend_lifecycle_restart.sh
+```
+Скрипт создаёт backend/job, перезапускает `gateway` и `worker`, потом отправляет повторную job и проверяет, что не возникает `Conflict. The container name ... is already in use`.
+
 ### Проверка GPU
 ```bash
 cd /opt/llm-switchboard/docker

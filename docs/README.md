@@ -107,6 +107,14 @@ This verifies:
 - `import worker.tasks` works,
 - `from gateway.app.config import load_config` works.
 
+### Lifecycle smoke test after gateway/worker restart
+```bash
+API_URL=http://127.0.0.1:8000 \
+GATEWAY_API_KEY='<key>' \
+./scripts/check_backend_lifecycle_restart.sh
+```
+This script creates a backend/job, restarts `gateway` and `worker`, then submits a second job and verifies there is no `Conflict. The container name ... is already in use`.
+
 ### GPU visibility
 ```bash
 cd /opt/llm-switchboard/docker

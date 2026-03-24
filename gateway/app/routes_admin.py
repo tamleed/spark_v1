@@ -24,6 +24,7 @@ def health(request: Request):
 
 @router.get("/status")
 def status(request: Request):
+    request.app.state.switcher.sync_state_with_docker(check_readiness=True)
     st = request.app.state.switcher.state
     q = get_queue(request.app.state.gateway_cfg)
     uptime = int(time.time() - request.app.state.started_at)
@@ -39,6 +40,7 @@ def status(request: Request):
 
 @router.get("/queue")
 def queue_status(request: Request):
+    request.app.state.switcher.sync_state_with_docker(check_readiness=False)
     st = request.app.state.switcher.state
     q = get_queue(request.app.state.gateway_cfg)
     current = request.app.state.current_job_id

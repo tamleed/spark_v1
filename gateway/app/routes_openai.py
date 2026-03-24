@@ -13,6 +13,7 @@ router = APIRouter(prefix="/v1", tags=["openai"])
 @router.get("/models")
 def list_models(request: Request):
     request.app.state.model_list = build_model_list(request.app.state.models_cfg, request.app.state.gateway_cfg)
+    request.app.state.switcher.sync_state_with_docker(check_readiness=False)
     models = request.app.state.model_list
     switcher = request.app.state.switcher
     return {
