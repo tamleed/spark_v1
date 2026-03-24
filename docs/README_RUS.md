@@ -149,6 +149,64 @@ curl -X POST "$API_BASE/v1/chat/completions" \
   }'
 ```
 
+### Реальный сценарий: спросить у одной модели, потом у другой
+Ниже полностью готовый набор команд (скопируйте и запустите по шагам).
+
+1) Посмотрите доступные модели и выберите два `id`:
+```bash
+curl -s -H "X-API-Key: $API_KEY" "$API_BASE/v1/models" | jq -r '.data[].id'
+```
+
+2) Отправьте вопрос в первую модель (замените `MODEL_A`):
+```bash
+MODEL_A="gpt-oss-20b"
+JOB1=$(curl -s -X POST "$API_BASE/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d "{
+    \"model\":\"$MODEL_A\",
+    \"messages\":[{\"role\":\"user\",\"content\":\"Кратко объясни, что такое RAG и когда он нужен.\"}],
+    \"stream\":false,
+    \"async\":true
+  }" | jq -r '.job_id')
+echo "JOB1=$JOB1"
+```
+
+3) Дождитесь завершения первой job и получите ответ:
+```bash
+until [[ "$(curl -s -H "X-API-Key: $API_KEY" "$API_BASE/jobs/$JOB1" | jq -r '.status')" == "succeeded" ]]; do
+  echo "waiting for $JOB1..."
+  sleep 2
+done
+curl -s -H "X-API-Key: $API_KEY" "$API_BASE/jobs/$JOB1/result" | jq
+```
+
+4) Отправьте второй вопрос во вторую модель (замените `MODEL_B`):
+```bash
+MODEL_B="qwen2.5-7b-instruct"
+JOB2=$(curl -s -X POST "$API_BASE/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d "{
+    \"model\":\"$MODEL_B\",
+    \"messages\":[{\"role\":\"user\",\"content\":\"Сделай сравнение RAG и fine-tuning в 5 пунктах.\"}],
+    \"stream\":false,
+    \"async\":true
+  }" | jq -r '.job_id')
+echo "JOB2=$JOB2"
+```
+
+5) Дождитесь завершения второй job и получите ответ:
+```bash
+until [[ "$(curl -s -H "X-API-Key: $API_KEY" "$API_BASE/jobs/$JOB2" | jq -r '.status')" == "succeeded" ]]; do
+  echo "waiting for $JOB2..."
+  sleep 2
+done
+curl -s -H "X-API-Key: $API_KEY" "$API_BASE/jobs/$JOB2/result" | jq
+```
+
+> Важно: для разных моделей отправляйте **разные async job**. Worker сам переключит backend-контейнер между `MODEL_A` и `MODEL_B`.
+
 #### Статус / результат job
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>"

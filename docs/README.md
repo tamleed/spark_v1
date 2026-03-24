@@ -151,6 +151,64 @@ curl -X POST "$API_BASE/v1/chat/completions" \
   }'
 ```
 
+### Real scenario: ask one model, then another model
+Below is a ready-to-run command sequence.
+
+1) List available models and pick two `id` values:
+```bash
+curl -s -H "X-API-Key: $API_KEY" "$API_BASE/v1/models" | jq -r '.data[].id'
+```
+
+2) Ask the first question to model A (replace `MODEL_A`):
+```bash
+MODEL_A="gpt-oss-20b"
+JOB1=$(curl -s -X POST "$API_BASE/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d "{
+    \"model\":\"$MODEL_A\",
+    \"messages\":[{\"role\":\"user\",\"content\":\"Briefly explain what RAG is and when to use it.\"}],
+    \"stream\":false,
+    \"async\":true
+  }" | jq -r '.job_id')
+echo "JOB1=$JOB1"
+```
+
+3) Wait for job 1 and fetch its result:
+```bash
+until [[ "$(curl -s -H "X-API-Key: $API_KEY" "$API_BASE/jobs/$JOB1" | jq -r '.status')" == "succeeded" ]]; do
+  echo "waiting for $JOB1..."
+  sleep 2
+done
+curl -s -H "X-API-Key: $API_KEY" "$API_BASE/jobs/$JOB1/result" | jq
+```
+
+4) Ask the second question to model B (replace `MODEL_B`):
+```bash
+MODEL_B="qwen2.5-7b-instruct"
+JOB2=$(curl -s -X POST "$API_BASE/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d "{
+    \"model\":\"$MODEL_B\",
+    \"messages\":[{\"role\":\"user\",\"content\":\"Compare RAG vs fine-tuning in 5 bullet points.\"}],
+    \"stream\":false,
+    \"async\":true
+  }" | jq -r '.job_id')
+echo "JOB2=$JOB2"
+```
+
+5) Wait for job 2 and fetch its result:
+```bash
+until [[ "$(curl -s -H "X-API-Key: $API_KEY" "$API_BASE/jobs/$JOB2" | jq -r '.status')" == "succeeded" ]]; do
+  echo "waiting for $JOB2..."
+  sleep 2
+done
+curl -s -H "X-API-Key: $API_KEY" "$API_BASE/jobs/$JOB2/result" | jq
+```
+
+> Important: for different models, submit separate async jobs. The worker will switch backend containers between `MODEL_A` and `MODEL_B` automatically.
+
 #### Job status/result
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/jobs/<job_id>"
