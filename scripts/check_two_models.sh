@@ -14,6 +14,9 @@ if [ -z "${API_KEY}" ]; then
 fi
 
 available_models="$(curl -fsS -H "X-API-Key: ${API_KEY}" "${API_URL}/v1/models")"
+echo "[INFO] available model ids:"
+echo "${available_models}" | jq -r '.data[].id'
+
 echo "${available_models}" | jq -e --arg m "${MODEL_A}" '.data[]? | select(.id == $m)' >/dev/null || {
   echo "[ERR] MODEL_A '${MODEL_A}' not found in /v1/models" >&2
   echo "${available_models}" | jq -r '.data[].id' >&2

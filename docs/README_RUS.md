@@ -128,6 +128,11 @@ MODEL_B='qwen3' \
 ```
 Скрипт отправляет два async-запроса подряд в разные модели и печатает result каждой job.
 
+То же самое одной строкой:
+```bash
+API_URL=http://127.0.0.1:8000 GATEWAY_API_KEY='<key>' MODEL_A='gpt-oss20b' MODEL_B='qwen3' ./scripts/check_two_models.sh
+```
+
 ### Проверка GPU
 ```bash
 cd /opt/llm-switchboard/docker
@@ -147,6 +152,17 @@ curl -H "X-API-Key: $ADMIN_API_KEY" http://127.0.0.1:8000/queue
 API_BASE="http://127.0.0.1:8000"
 API_KEY="$GATEWAY_API_KEY"
 ADMIN_KEY="$ADMIN_API_KEY"
+```
+
+### Откуда брать названия моделей (`model id`)
+- Источник истины — `GET /v1/models`.
+- `id` может появиться:
+  1. из `configs/models.yaml` как поле `name`;
+  2. из auto-discovery: тогда `id` = имя директории модели в `MODEL_DISCOVERY_DIRS`.
+- Всегда используйте именно `id` из ответа `/v1/models` в поле `"model"` у chat-запроса.
+
+```bash
+curl -s -H "X-API-Key: $API_KEY" "$API_BASE/v1/models" | jq -r '.data[].id'
 ```
 
 #### Health

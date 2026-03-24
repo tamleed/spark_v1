@@ -151,6 +151,17 @@ API_KEY="$GATEWAY_API_KEY"
 ADMIN_KEY="$ADMIN_API_KEY"
 ```
 
+### Where model names (`model id`) come from
+- Source of truth is `GET /v1/models`.
+- `id` can come from:
+  1. `configs/models.yaml` (`name` field),
+  2. auto-discovery (then `id` equals directory name under `MODEL_DISCOVERY_DIRS`).
+- Always use the exact `id` from `/v1/models` in chat payload `"model"`.
+
+```bash
+curl -s -H "X-API-Key: $API_KEY" "$API_BASE/v1/models" | jq -r '.data[].id'
+```
+
 #### Health
 ```bash
 curl -H "X-API-Key: $API_KEY" "$API_BASE/health"
